@@ -23,11 +23,23 @@ def artist_name(item):
     return item.get('artist') or 'Неизвестен'
 
 
-def song(item, fb=''):
+def artist_list(item):
+    out = []
+    a = item.get('artists')
+    if a and isinstance(a, list):
+        for x in a:
+            if isinstance(x, dict) and x.get('name'):
+                out.append({'name': x['name'], 'id': x.get('id')})
+    return out
+
+
+def song(item, fb='', fa=None):
+    arts = artist_list(item) or (fa or [])
     return {
         'id': item['videoId'],
         'title': item.get('title', 'Без названия'),
-        'artist': artist_name(item),
+        'artist': ', '.join(x['name'] for x in arts) if arts else artist_name(item),
+        'artists': arts,
         'cover': cover(item, fb),
     }
 
@@ -98,7 +110,7 @@ def album():
         'artist': artist_name(a),
         'year': a.get('year', ''),
         'cover': c,
-        'tracks': [song(t, c) for t in a.get('tracks', []) if t.get('videoId')],
+        'tracks': [song(t, c, artist_list(a)) for t in a.get('tracks', []) if t.get('videoId')],
     })
 
 
@@ -115,7 +127,7 @@ def artist():
         'id': request.args.get('id', ''),
         'title': name,
         'cover': cover(a),
-        'tracks': [song(s) for s in songs if s.get('videoId')],
+        'tracks': [song(s, '', [{'name': name, 'id': request.args.get('id', '')}]) for s in songs if s.get('videoId')],
         'albums': [album_card(x, name) for x in albums if x.get('browseId')],
     })
 
@@ -139,7 +151,8 @@ def track():
         d = yt.get_song(request.args.get('id', ''))['videoDetails']
         th = d['thumbnail']['thumbnails']
         return jsonify({'id': d['videoId'], 'title': d.get('title', ''),
-                        'artist': d.get('author', ''), 'cover': th[-1]['url']})
+                        'artist': d.get('author', ''), 'cover': th[-1]['url'],
+                        'artists': [{'name': d.get('author', ''), 'id': d.get('channelId')}]})
     except Exception as e:
         return jsonify(error=str(e)), 502
 
