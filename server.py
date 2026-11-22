@@ -1,5 +1,7 @@
 import os
-from flask import Flask, request, jsonify, send_from_directory
+import requests
+from urllib.parse import urlparse
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from ytmusicapi import YTMusic
 
@@ -10,7 +12,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 
 
 def cover(item, fb=''):
-    th = (item or {}).get('thumbnails') or []
+    th = (item or {}).get('thumbnails') or (item or {}).get('thumbnail') or []
     return th[-1]['url'] if th else fb
 
 
@@ -155,6 +157,43 @@ def track():
                         'artists': [{'name': d.get('author', ''), 'id': d.get('channelId')}]})
     except Exception as e:
         return jsonify(error=str(e)), 502
+
+
+def _items(v):
+    return (v.get('items') if isinstance(v, dict) else v) or []
+
+
+@app.route('/charts')
+def charts():
+    try:
+        c = yt.get_charts(request.args.get('country', 'ZZ'))
+    except Exception as e:
+        return jsonify(error=str(e)), 502
+    items = _items(c.get('songs')) or _items(c.get('videos'))
+    return jsonify([song(x) for x in items if x.get('videoId')][:30])
+
+
+@app.route('/radio')
+def radio():
+    try:
+        w = yt.get_watch_playlist(videoId=request.args.get('id', ''), radio=True, limit=25)
+    except Exception as e:
+        return jsonify(error=str(e)), 502
+    return jsonify([song(x) for x in w.get('tracks', []) if x.get('videoId')][1:])
+
+
+@app.route('/img')
+def img():  # прокси обложек (только хосты YouTube), чтобы страница могла считать цвет
+    u = request.args.get('u', '')
+    h = urlparse(u).hostname or ''
+    if not u.startswith('https://') or not h.endswith(('googleusercontent.com', 'ggpht.com', 'ytimg.com')):
+        return ('', 400)
+    try:
+        r = requests.get(u, timeout=8)
+    except Exception:
+        return ('', 502)
+    return Response(r.content, mimetype=r.headers.get('Content-Type', 'image/jpeg'),
+                    headers={'Cache-Control': 'public, max-age=86400'})
 
 
 if __name__ == '__main__':
