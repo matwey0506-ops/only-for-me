@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_from_directory, Response
@@ -134,17 +135,94 @@ def artist():
     })
 
 
-@app.route('/lyrics')
-def lyrics():
+_TS = re.compile(r'\[(\d+):(\d+(?:\.\d+)?)\]')
+_UA = {'User-Agent': 'TriXXDe/1.0 (music web player)'}
+
+
+def parse_lrc(txt):
+    out = []
+    for ln in (txt or '').splitlines():
+        ts = _TS.findall(ln)
+        if not ts:
+            continue
+        text = _TS.sub('', ln).strip()
+        for m, sec in ts:
+            out.append({'t': round(int(m) * 60 + float(sec), 2), 'x': text})
+    out.sort(key=lambda z: z['t'])
+    return out
+
+
+def yt_lyrics(video_id):
+    """-> (строки с таймингами | None, обычный текст | None) из YouTube Music"""
     try:
-        w = yt.get_watch_playlist(request.args.get('id', ''))
+        w = yt.get_watch_playlist(video_id)
         lid = w.get('lyrics')
         if not lid:
-            return jsonify(lyrics=None)
-        l = yt.get_lyrics(lid)
-        return jsonify(lyrics=(l.get('lyrics') if l else None))
+            return None, None
+        try:
+            l = yt.get_lyrics(lid, timestamps=True)
+        except TypeError:  # старая версия ytmusicapi без таймингов
+            l = yt.get_lyrics(lid)
+        if not l:
+            return None, None
+        data = l.get('lyrics')
+        if l.get('hasTimestamps') and isinstance(data, list):
+            lines = []
+            for x in data:
+                g = (lambda k: x[k] if isinstance(x, dict) else getattr(x, k))
+                lines.append({'t': round(g('start_time') / 1000, 2), 'x': g('text')})
+            return lines, None
+        return None, (data if isinstance(data, str) else None)
     except Exception:
-        return jsonify(lyrics=None)
+        return None, None
+
+
+def clean_title(t):
+    return re.sub(r'\s*[\(\[].*?[\)\]]', '', t or '').strip() or t
+
+
+def lrclib(title, artist, dur):
+    """-> (строки с таймингами | None, обычный текст | None) из открытой базы LRCLIB"""
+    try:
+        d = None
+        params = {'track_name': title, 'artist_name': artist}
+        if dur:
+            params['duration'] = int(dur)
+        r = requests.get('https://lrclib.net/api/get', params=params, timeout=6, headers=_UA)
+        if r.status_code == 200:
+            d = r.json()
+        if not d:
+            r = requests.get('https://lrclib.net/api/search',
+                             params={'track_name': clean_title(title), 'artist_name': artist}, timeout=6, headers=_UA)
+            arr = r.json() if r.status_code == 200 else []
+            if dur:
+                near = [a for a in arr if abs((a.get('duration') or 0) - dur) <= 5]
+                arr = near or arr
+            d = next((a for a in arr if a.get('syncedLyrics')), arr[0] if arr else None)
+        if not d:
+            return None, None
+        return (parse_lrc(d.get('syncedLyrics')) or None), d.get('plainLyrics')
+    except Exception:
+        return None, None
+
+
+@app.route('/lyrics')
+def lyrics():
+    vid = request.args.get('id', '')
+    title = request.args.get('title', '').strip()
+    artist = request.args.get('artist', '').strip()
+    try:
+        dur = float(request.args.get('dur', '') or 0)
+    except ValueError:
+        dur = 0
+    lines, plain = yt_lyrics(vid)
+    if not lines and title:
+        l2, p2 = lrclib(title, artist, dur)
+        lines = l2 or lines
+        plain = plain or p2
+    if lines and not plain:
+        plain = '\n'.join(x['x'] for x in lines)
+    return jsonify(lines=lines or None, lyrics=plain)
 
 
 @app.route('/track')
