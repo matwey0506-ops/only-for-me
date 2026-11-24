@@ -1,5 +1,7 @@
 import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_from_directory, Response
@@ -223,6 +225,83 @@ def lyrics():
     if lines and not plain:
         plain = '\n'.join(x['x'] for x in lines)
     return jsonify(lines=lines or None, lyrics=plain)
+
+
+_PIPED_STATIC = ['https://pipedapi.kavin.rocks', 'https://api.piped.private.coffee',
+                 'https://pipedapi.leptons.xyz', 'https://pipedapi.adminforge.de']
+_inst = {'t': 0, 'piped': [], 'inv': []}
+_acache = {}
+
+
+def _instances():
+    """живые публичные экземпляры Piped/Invidious (список кэшируется на 10 минут)"""
+    if time.time() - _inst['t'] < 600 and _inst['piped']:
+        return _inst
+    piped, inv = [], []
+    try:
+        j = requests.get('https://piped-instances.kavin.rocks/', timeout=5, headers=_UA).json()
+        j = sorted(j, key=lambda x: -(x.get('uptime_24h') or 0))
+        piped = [x['api_url'] for x in j if x.get('api_url') and (x.get('uptime_24h') is None or x['uptime_24h'] > 70)][:5]
+    except Exception:
+        pass
+    try:
+        j = requests.get('https://api.invidious.io/instances.json?sort_by=type,health', timeout=5, headers=_UA).json()
+        inv = [d['uri'] for _, d in j if isinstance(d, dict) and d.get('api') is True
+               and d.get('type') == 'https' and d.get('uri')][:4]
+    except Exception:
+        pass
+    _inst.update(t=time.time(), piped=list(dict.fromkeys(piped + _PIPED_STATIC))[:7], inv=inv)
+    return _inst
+
+
+def _piped_url(base, vid):
+    j = requests.get(f'{base}/streams/{vid}', timeout=7, headers=_UA).json()
+    a = [x for x in j.get('audioStreams', []) if x.get('url')]
+    m = sorted([x for x in a if re.search(r'mp4|m4a', (x.get('mimeType') or '') + (x.get('format') or ''), re.I)],
+               key=lambda x: -(x.get('bitrate') or 0))
+    return (m or a or [{}])[0].get('url')
+
+
+def _inv_url(base, vid):
+    j = requests.get(f'{base}/api/v1/videos/{vid}', params={'local': 'true', 'fields': 'adaptiveFormats'},
+                     timeout=7, headers=_UA).json()
+    a = sorted([x for x in j.get('adaptiveFormats', []) if x.get('url') and str(x.get('type', '')).startswith('audio/mp4')],
+               key=lambda x: -int(x.get('bitrate') or 0))
+    return a[0]['url'] if a else None
+
+
+@app.route('/audio')
+def audio():
+    """прямой аудио-поток трека: сервер опрашивает публичные источники параллельно, берёт первый ответ"""
+    vid = request.args.get('id', '')
+    if not re.fullmatch(r'[\w-]{6,20}', vid):
+        return jsonify(error='bad id'), 400
+    hit = _acache.get(vid)
+    if hit and time.time() - hit[0] < 1800:
+        return jsonify(url=hit[1])
+    ins = _instances()
+    jobs = [(_piped_url, b) for b in ins['piped']] + [(_inv_url, b) for b in ins['inv']]
+    ex = ThreadPoolExecutor(max_workers=max(1, len(jobs)))
+    futs = [ex.submit(f, b, vid) for f, b in jobs]
+    url = None
+    try:
+        for fu in as_completed(futs, timeout=9):
+            try:
+                u = fu.result()
+            except Exception:
+                continue
+            if u:
+                url = u
+                break
+    except Exception:
+        pass
+    ex.shutdown(wait=False)
+    if url:
+        if len(_acache) > 500:
+            _acache.clear()
+        _acache[vid] = (time.time(), url)
+        return jsonify(url=url)
+    return jsonify(url=None), 404
 
 
 @app.route('/track')
