@@ -304,6 +304,31 @@ def audio():
     return jsonify(url=None), 404
 
 
+@app.route('/playlist')
+def playlist():
+    """импорт плейлиста YouTube Music по id из ссылки"""
+    pid = request.args.get('id', '').strip()
+    if not re.fullmatch(r'[\w-]{10,64}', pid):
+        return jsonify(error='bad id'), 400
+    try:
+        p = yt.get_playlist(pid, limit=300)
+    except Exception as e:
+        return jsonify(error=str(e)), 502
+    return jsonify({'title': p.get('title', ''), 'cover': cover(p),
+                    'tracks': [song(t) for t in p.get('tracks', []) if t.get('videoId')]})
+
+
+@app.route('/suggest')
+def suggest():
+    q = request.args.get('q', '').strip()
+    if len(q) < 2:
+        return jsonify([])
+    try:
+        return jsonify([x for x in yt.get_search_suggestions(q) if isinstance(x, str)][:8])
+    except Exception:
+        return jsonify([])
+
+
 @app.route('/track')
 def track():
     try:
