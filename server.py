@@ -172,7 +172,11 @@ def yt_lyrics(video_id):
             lines = []
             for x in data:
                 g = (lambda k: x[k] if isinstance(x, dict) else getattr(x, k))
-                lines.append({'t': round(g('start_time') / 1000, 2), 'x': g('text')})
+                try:
+                    end = round(g('end_time') / 1000, 2)
+                except Exception:
+                    end = None
+                lines.append({'t': round(g('start_time') / 1000, 2), 'x': g('text'), 'e': end})
             return lines, None
         return None, (data if isinstance(data, str) else None)
     except Exception:
@@ -327,6 +331,40 @@ def suggest():
         return jsonify([x for x in yt.get_search_suggestions(q) if isinstance(x, str)][:8])
     except Exception:
         return jsonify([])
+
+
+_fcache = {}
+
+
+def _artist_releases(aid):
+    hit = _fcache.get(aid)
+    if hit and time.time() - hit[0] < 1800:
+        return hit[1]
+    try:
+        a = yt.get_artist(aid)
+    except Exception:
+        return []
+    name, rel = a.get('name', ''), []
+    for key in ('albums', 'singles'):
+        for x in ((a.get(key) or {}).get('results') or []):
+            if x.get('browseId'):
+                rel.append({'id': x['browseId'], 'title': x.get('title', ''), 'artist': name, 'artistId': aid,
+                            'cover': cover(x), 'year': str(x.get('year') or ''),
+                            'type': 'Single' if key == 'singles' else (x.get('type') or 'Album')})
+    _fcache[aid] = (time.time(), rel)
+    return rel
+
+
+@app.route('/feed')
+def feed():
+    """свежие релизы артистов, на которых подписан пользователь (ids через запятую)"""
+    ids = [i for i in request.args.get('ids', '').split(',') if re.fullmatch(r'[\w-]{10,40}', i)][:12]
+    out = []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for res in ex.map(_artist_releases, ids):
+            out.extend(res)
+    out.sort(key=lambda r: r['year'], reverse=True)
+    return jsonify(out[:60])
 
 
 @app.route('/track')
